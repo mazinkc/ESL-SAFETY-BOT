@@ -2,7 +2,7 @@
 ESL Safety Observation Bot — Firebase Edition
 ==============================================
 Officers post in WhatsApp group → Mazin forwards to this bot
-→ Auto-stored in Firestore + image in Firebase Storage
+→ Auto-stored in Firestore + image URL from Telegram
 → /report generates PPTX + Excel instantly
 """
 
@@ -15,7 +15,7 @@ import requests
 from datetime import datetime
 
 import firebase_admin
-from firebase_admin import credentials, firestore, storage
+from firebase_admin import credentials, firestore
 
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -34,20 +34,11 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── FIREBASE CONFIG ────────────────────────────────────────────────────────
-# Project  : apex-esl
-# Bucket   : apex-esl.firebasestorage.app
-# Only FIREBASE_CREDS_JSON + BOT_TOKEN needed as env vars on Render
-# ─────────────────────────────────────────────────────────────────────────────
-FIREBASE_BUCKET = "apex-esl.firebasestorage.app"
-
 _firebase_creds = json.loads(os.environ["FIREBASE_CREDS_JSON"])
 _cred = credentials.Certificate(_firebase_creds)
-firebase_admin.initialize_app(_cred, {
-    "storageBucket": FIREBASE_BUCKET
-})
+firebase_admin.initialize_app(_cred)
 
-db     = firestore.client()
-bucket = storage.bucket()
+db = firestore.client()
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
@@ -80,16 +71,6 @@ def _next_ref() -> str:
     counter_ref.set({"count": n})
     year = datetime.now().strftime("%y")
     return f"OBS-{year}-{n:04d}"
-
-
-def upload_image(image_bytes: bytes, ref_no: str, mime: str = "image/jpeg") -> str:
-    """Upload image to Firebase Storage, return public URL."""
-    ext  = "jpg" if "jpeg" in mime else mime.split("/")[-1]
-    path = f"observations/{ref_no}/photo.{ext}"
-    blob = bucket.blob(path)
-    blob.upload_from_string(image_bytes, content_type=mime)
-    blob.make_public()
-    return blob.public_url
 
 
 def save_observation(obs: dict) -> str:
@@ -167,8 +148,8 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         date_str = datetime.now().strftime("%d%m%Y")
 
-        xl  = generate_excel(all_obs)
-        pp  = generate_pptx(all_obs)
+        xl = generate_excel(all_obs)
+        pp = generate_pptx(all_obs)
 
         await msg.delete()
 
@@ -205,30 +186,24 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Upload image if attached ──────────────────────────────────────────
+    # ── Get Telegram image URL (no Firebase Storage needed) ───────────────
     obs["image_url"] = ""
+    obs["file_id"]   = ""
+
     if message.photo:
         try:
-            photo    = message.photo[-1]
-            tg_file  = await ctx.bot.get_file(photo.file_id)
-            r        = requests.get(tg_file.file_path, timeout=10)
-            r.raise_for_status()
-            # We'll get a temp ref to upload — actual save happens after ref_no assigned
-            obs["_image_bytes"] = r.content
+            photo   = message.photo[-1]          # largest size
+            tg_file = await ctx.bot.get_file(photo.file_id)
+            # file_path is the full HTTPS download URL from Telegram servers
+            obs["image_url"] = tg_file.file_path
+            obs["file_id"]   = photo.file_id
+            log.info(f"Image URL captured from Telegram")
         except Exception as e:
-            log.warning(f"Image download failed: {e}")
+            log.warning(f"Image capture failed: {e}")
 
     # ── Save to Firestore ─────────────────────────────────────────────────
     try:
-        # Extract image bytes before saving (ref_no assigned inside)
-        image_bytes = obs.pop("_image_bytes", None)
-
         ref_no = save_observation(obs)
-
-        if image_bytes:
-            url = upload_image(image_bytes, ref_no)
-            db.collection("observations").document(ref_no).update({"image_url": url})
-            obs["image_url"] = url
 
         img_note = "📷 Photo saved ✅" if obs.get("image_url") else "📷 No photo"
 
