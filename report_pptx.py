@@ -1,346 +1,369 @@
 """
-PPTX report generator — ESL Safety Observations
-Layout: 2 observations per slide side by side with image + details
-Brand: ESL Steel / Vedanta (dark theme: #0D1117, orange #F97316, blue #3B82F6)
+ESL Safety Observation — PPTX Report Generator
+White background | Vedanta/ESL Logo | 2 observations per slide
+Supports: full report, daily report, per-area report
 """
 
 import io
+import base64
 import requests
-import logging
 from datetime import datetime
-from itertools import zip_longest
 
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
-log = logging.getLogger(__name__)
+# ─── LOGO (Vedanta / ESL Steel — base64 embedded) ────────────────────────────
+LOGO_B64 = "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"
 
-# ─── BRAND COLORS ────────────────────────────────────────────────────────────
-DARK    = RGBColor(0x0D, 0x11, 0x17)
-SURF    = RGBColor(0x11, 0x18, 0x27)
-SURF2   = RGBColor(0x1F, 0x29, 0x37)
-BORDER  = RGBColor(0x37, 0x41, 0x51)
-ORANGE  = RGBColor(0xF9, 0x73, 0x16)
-BLUE    = RGBColor(0x3B, 0x82, 0xF6)
-GREEN   = RGBColor(0x22, 0xC5, 0x5E)
-YELLOW  = RGBColor(0xEA, 0xB3, 0x08)
-RED     = RGBColor(0xEF, 0x44, 0x44)
-WHITE   = RGBColor(0xFF, 0xFF, 0xFF)
-MUTED   = RGBColor(0x9C, 0xA3, 0xAF)
-TEXT    = RGBColor(0xE2, 0xE8, 0xF0)
+# ─── BRAND COLORS ─────────────────────────────────────────────────────────────
+WHITE      = RGBColor(0xFF, 0xFF, 0xFF)
+DARK_BLUE  = RGBColor(0x00, 0x33, 0x6B)   # Vedanta navy
+ORANGE     = RGBColor(0xE8, 0x5A, 0x0E)   # Vedanta orange
+LIGHT_GRAY = RGBColor(0xF2, 0xF4, 0xF7)
+MID_GRAY   = RGBColor(0xCC, 0xCC, 0xCC)
+TEXT_DARK  = RGBColor(0x1A, 0x1A, 0x2E)
 
-STATUS_COLOR = {
-    "open":             RED,
-    "partially closed": YELLOW,
-    "in progress":      YELLOW,
-    "closed":           GREEN,
+STATUS_COLORS = {
+    "open":        RGBColor(0xDC, 0x26, 0x26),  # red
+    "in progress": RGBColor(0xD9, 0x77, 0x06),  # amber
+    "closed":      RGBColor(0x16, 0xA3, 0x4A),  # green
 }
 
-# ─── SLIDE DIMENSIONS (widescreen 16:9) ──────────────────────────────────────
-W = Inches(13.33)
-H = Inches(7.5)
+AREAS = [
+    "RMHS", "SINTER", "COKE OVEN", "POWERPLANT",
+    "BLAST FURNACE 2", "BLAST FURNACE 3", "PCI", "PCM", "SECONDARY OPERATIONS"
+]
 
-# Column layout: left panel x=0.15, right panel x=6.74
-PANEL_W  = Inches(6.44)
-PANEL_H  = Inches(5.85)
-PANEL_Y  = Inches(1.45)
-LEFT_X   = Inches(0.15)
-RIGHT_X  = Inches(6.74)
-GAP      = Inches(0.15)
+# ─── SLIDE DIMENSIONS (Widescreen 13.33" × 7.5") ─────────────────────────────
+W  = Inches(13.33)
+H  = Inches(7.5)
 
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
-def rect(slide, x, y, w, h, fill: RGBColor, line: RGBColor = None, line_w=0.75):
-    s = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, w, h)
-    s.fill.solid()
-    s.fill.fore_color.rgb = fill
-    if line:
-        s.line.color.rgb = line
-        s.line.width     = Pt(line_w)
-    else:
-        s.line.fill.background()
-    return s
+def _logo_stream() -> io.BytesIO:
+    return io.BytesIO(base64.b64decode(LOGO_B64))
 
 
-def txbox(slide, text, x, y, w, h,
-          size=11, bold=False, color=None, align=PP_ALIGN.LEFT, wrap=True):
-    color = color or TEXT
-    tb = slide.shapes.add_textbox(x, y, w, h)
-    tf = tb.text_frame
+def _fill_white(shape):
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = WHITE
+
+
+def _add_rect(slide, left, top, width, height, color: RGBColor):
+    shape = slide.shapes.add_shape(1, left, top, width, height)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
+    return shape
+
+
+def _tf(shape, text, size, bold=False, color=TEXT_DARK, align=PP_ALIGN.LEFT, wrap=True):
+    tf = shape.text_frame
     tf.word_wrap = wrap
-    p   = tf.paragraphs[0]
+    p = tf.paragraphs[0]
     p.alignment = align
     run = p.add_run()
-    run.text           = str(text)
-    run.font.size      = Pt(size)
-    run.font.bold      = bold
+    run.text = text
+    run.font.size = Pt(size)
+    run.font.bold = bold
     run.font.color.rgb = color
-    run.font.name      = "Segoe UI"
-    return tb
 
 
-def fetch_image(url: str) -> bytes | None:
+def _status_color(status: str) -> RGBColor:
+    s = (status or "open").lower()
+    for key, col in STATUS_COLORS.items():
+        if key in s:
+            return col
+    return STATUS_COLORS["open"]
+
+
+def _fetch_image(url: str) -> io.BytesIO | None:
+    if not url:
+        return None
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        return r.content
-    except Exception as e:
-        log.warning(f"Image fetch failed: {e}")
+        return io.BytesIO(r.content)
+    except Exception:
         return None
 
 
-# ─── SLIDE BUILDERS ──────────────────────────────────────────────────────────
-def _slide_title(prs, total, open_c, closed_c):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
+# ─── TITLE SLIDE ─────────────────────────────────────────────────────────────
+def _add_title_slide(prs, title_line1, title_line2, obs_list):
+    slide_layout = prs.slide_layouts[6]  # blank
+    slide = prs.slides.add_slide(slide_layout)
 
-    # Full dark background
-    sl.background.fill.solid()
-    sl.background.fill.fore_color.rgb = DARK
+    # White background
+    bg = slide.background
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = WHITE
 
-    # Orange hazard stripe top
-    rect(sl, 0, 0, W, Inches(0.18), ORANGE)
+    # Top navy bar
+    bar = _add_rect(slide, 0, 0, W, Inches(1.3), DARK_BLUE)
 
-    # Orange hazard stripe bottom
-    rect(sl, 0, H - Inches(0.18), W, Inches(0.18), ORANGE)
+    # Logo in top-left of bar
+    logo = slide.shapes.add_picture(_logo_stream(), Inches(0.2), Inches(0.1), Inches(2.5), Inches(1.1))
 
-    # Center glow panel
-    rect(sl, Inches(1.2), Inches(1.6), Inches(10.93), Inches(4.6), SURF)
+    # Title text in bar
+    tx = slide.shapes.add_textbox(Inches(3), Inches(0.15), Inches(9.5), Inches(1.0))
+    tf = tx.text_frame
+    tf.word_wrap = False
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.RIGHT
+    run = p.add_run()
+    run.text = "ESL STEEL LIMITED | Safety Observations"
+    run.font.size = Pt(18)
+    run.font.bold = True
+    run.font.color.rgb = WHITE
 
-    # Orange left accent bar
-    rect(sl, Inches(1.2), Inches(1.6), Inches(0.12), Inches(4.6), ORANGE)
-
-    # ESL label
-    txbox(sl, "VEDANTA GROUP  |  ESL STEEL LIMITED  |  BOKARO",
-          Inches(1.5), Inches(1.9), Inches(10.4), Inches(0.6),
-          size=12, color=MUTED, align=PP_ALIGN.CENTER)
+    # Orange accent bar
+    _add_rect(slide, 0, Inches(1.3), W, Inches(0.08), ORANGE)
 
     # Main title
-    txbox(sl, "Safety Observations Report",
-          Inches(1.5), Inches(2.55), Inches(10.4), Inches(1.4),
-          size=40, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+    tx2 = slide.shapes.add_textbox(Inches(1.5), Inches(2.0), Inches(10), Inches(1.2))
+    tf2 = tx2.text_frame
+    p2 = tf2.paragraphs[0]
+    p2.alignment = PP_ALIGN.CENTER
+    r2 = p2.add_run()
+    r2.text = title_line1
+    r2.font.size = Pt(36)
+    r2.font.bold = True
+    r2.font.color.rgb = DARK_BLUE
 
-    # Divider
-    rect(sl, Inches(3.5), Inches(3.95), Inches(6.33), Inches(0.04), ORANGE)
+    # Subtitle
+    tx3 = slide.shapes.add_textbox(Inches(1.5), Inches(3.3), Inches(10), Inches(0.8))
+    tf3 = tx3.text_frame
+    p3 = tf3.paragraphs[0]
+    p3.alignment = PP_ALIGN.CENTER
+    r3 = p3.add_run()
+    r3.text = title_line2
+    r3.font.size = Pt(22)
+    r3.font.color.rgb = ORANGE
 
     # Stats row
+    total    = len(obs_list)
+    open_c   = sum(1 for o in obs_list if "open" in (o.get("status","")).lower() and "progress" not in (o.get("status","")).lower())
+    prog_c   = sum(1 for o in obs_list if "progress" in (o.get("status","")).lower())
+    closed_c = sum(1 for o in obs_list if "closed" in (o.get("status","")).lower())
+
     stats = [
-        (str(total),    "TOTAL",   BLUE),
-        (str(open_c),   "OPEN",    RED),
-        (str(closed_c), "CLOSED",  GREEN),
+        ("Total", str(total), DARK_BLUE),
+        ("Open", str(open_c), STATUS_COLORS["open"]),
+        ("In Progress", str(prog_c), STATUS_COLORS["in progress"]),
+        ("Closed", str(closed_c), STATUS_COLORS["closed"]),
     ]
-    for i, (val, label, clr) in enumerate(stats):
-        cx = Inches(3.7 + i * 2.1)
-        txbox(sl, val,   cx, Inches(4.1), Inches(2.0), Inches(0.75),
-              size=28, bold=True, color=clr, align=PP_ALIGN.CENTER)
-        txbox(sl, label, cx, Inches(4.85), Inches(2.0), Inches(0.45),
-              size=10, color=MUTED, align=PP_ALIGN.CENTER)
+    box_w = Inches(2.5)
+    start_x = Inches(1.9)
+    for i, (label, val, col) in enumerate(stats):
+        bx = start_x + i * (box_w + Inches(0.3))
+        card = _add_rect(slide, bx, Inches(4.4), box_w, Inches(1.8), col)
+        tx4 = slide.shapes.add_textbox(bx, Inches(4.4), box_w, Inches(1.0))
+        tf4 = tx4.text_frame
+        p4 = tf4.paragraphs[0]
+        p4.alignment = PP_ALIGN.CENTER
+        r4 = p4.add_run()
+        r4.text = val
+        r4.font.size = Pt(36)
+        r4.font.bold = True
+        r4.font.color.rgb = WHITE
 
-    # Date
-    txbox(sl, datetime.now().strftime("%d %B %Y"),
-          Inches(1.5), Inches(5.6), Inches(10.4), Inches(0.5),
-          size=12, color=MUTED, align=PP_ALIGN.CENTER)
+        tx5 = slide.shapes.add_textbox(bx, Inches(5.3), box_w, Inches(0.5))
+        tf5 = tx5.text_frame
+        p5 = tf5.paragraphs[0]
+        p5.alignment = PP_ALIGN.CENTER
+        r5 = p5.add_run()
+        r5.text = label
+        r5.font.size = Pt(13)
+        r5.font.bold = True
+        r5.font.color.rgb = WHITE
 
+    # Bottom footer
+    _add_rect(slide, 0, Inches(6.9), W, Inches(0.6), LIGHT_GRAY)
+    tx6 = slide.shapes.add_textbox(Inches(0.3), Inches(6.95), Inches(12), Inches(0.4))
+    tf6 = tx6.text_frame
+    p6 = tf6.paragraphs[0]
+    p6.alignment = PP_ALIGN.CENTER
+    r6 = p6.add_run()
+    r6.text = f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  Vedanta Group — ESL Steel Limited"
+    r6.font.size = Pt(9)
+    r6.font.color.rgb = MID_GRAY
 
-def _slide_summary(prs, total, open_c, partial_c, closed_c):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    sl.background.fill.solid()
-    sl.background.fill.fore_color.rgb = DARK
-
-    # Header
-    rect(sl, 0, 0, W, Inches(1.2), SURF)
-    rect(sl, 0, 0, Inches(0.12), Inches(1.2), ORANGE)
-    txbox(sl, "Observations Summary",
-          Inches(0.35), Inches(0.2), Inches(9), Inches(0.8),
-          size=26, bold=True, color=WHITE)
-    txbox(sl, datetime.now().strftime("%d/%m/%Y"),
-          Inches(10), Inches(0.35), Inches(3.0), Inches(0.5),
-          size=12, color=MUTED, align=PP_ALIGN.RIGHT)
-
-    rate  = f"{closed_c / total * 100:.1f}%" if total else "N/A"
-    cards = [
-        ("Total",            str(total),     BLUE,   SURF2),
-        ("Open",             str(open_c),    RED,    SURF2),
-        ("Partially Closed", str(partial_c), YELLOW, SURF2),
-        ("Closed",           str(closed_c),  GREEN,  SURF2),
-    ]
-
-    card_w = Inches(2.9)
-    gap    = Inches(0.28)
-    sx     = (W - (card_w * 4 + gap * 3)) / 2
-
-    for i, (label, val, clr, bg) in enumerate(cards):
-        cx = sx + i * (card_w + gap)
-        cy = Inches(1.45)
-
-        # Card
-        rect(sl, cx, cy, card_w, Inches(3.5), SURF2)
-        # Top accent line
-        rect(sl, cx, cy, card_w, Inches(0.1), clr)
-
-        # Big number
-        txbox(sl, val,
-              cx, cy + Inches(0.4), card_w, Inches(1.6),
-              size=52, bold=True, color=clr, align=PP_ALIGN.CENTER)
-
-        # Label
-        txbox(sl, label,
-              cx, cy + Inches(2.1), card_w, Inches(0.6),
-              size=12, color=MUTED, align=PP_ALIGN.CENTER)
-
-    # Closure rate bar
-    rect(sl, Inches(3.2), Inches(5.4), Inches(6.93), Inches(0.95), SURF2)
-    rect(sl, Inches(3.2), Inches(5.4), Inches(0.12), Inches(0.95), ORANGE)
-    txbox(sl, f"Closure Rate:  {rate}",
-          Inches(3.5), Inches(5.5), Inches(6.63), Inches(0.75),
-          size=22, bold=True, color=ORANGE, align=PP_ALIGN.CENTER)
+    return slide
 
 
-def _draw_obs_panel(sl, obs, panel_x):
-    """Draw one observation panel (left or right side of slide)."""
-    status     = obs.get("status", "Open").strip()
-    status_key = status.lower()
-    s_color    = STATUS_COLOR.get(status_key, MUTED)
-    image_url  = obs.get("image_url", "").strip()
+# ─── OBSERVATION CARD (half-slide) ───────────────────────────────────────────
+def _add_obs_card(slide, obs: dict, left: Emu, top: Emu, width: Emu, height: Emu):
+    status = obs.get("status", "Open")
+    sc     = _status_color(status)
 
-    # ── Panel background ──────────────────────────────────────────────────────
-    rect(sl, panel_x, PANEL_Y, PANEL_W, PANEL_H, SURF2)
+    # Card background
+    card = _add_rect(slide, left, top, width, height, LIGHT_GRAY)
+    card.line.color.rgb = MID_GRAY
+    card.line.width = Pt(0.5)
 
-    # ── Top accent bar (status color) ─────────────────────────────────────────
-    rect(sl, panel_x, PANEL_Y, PANEL_W, Inches(0.1), s_color)
+    # Status colour strip on top
+    _add_rect(slide, left, top, width, Inches(0.18), sc)
 
-    # ── Ref No + Status badge row ─────────────────────────────────────────────
-    txbox(sl, obs.get("ref_no", ""),
-          panel_x + Inches(0.15), PANEL_Y + Inches(0.15),
-          Inches(3.5), Inches(0.45),
-          size=13, bold=True, color=WHITE)
+    # Ref + Status badge
+    ref_no = obs.get("ref_no", "—")
+    badge_w = Inches(1.4)
+    badge = _add_rect(slide, left + width - badge_w - Inches(0.1), top + Inches(0.22),
+                      badge_w, Inches(0.28), sc)
+    tx_b = slide.shapes.add_textbox(left + width - badge_w - Inches(0.1), top + Inches(0.22),
+                                    badge_w, Inches(0.28))
+    tf_b = tx_b.text_frame
+    p_b  = tf_b.paragraphs[0]
+    p_b.alignment = PP_ALIGN.CENTER
+    r_b  = p_b.add_run()
+    r_b.text = status.upper()
+    r_b.font.size = Pt(7)
+    r_b.font.bold = True
+    r_b.font.color.rgb = WHITE
 
-    # Status badge
-    badge_w = Inches(1.8)
-    badge_x = panel_x + PANEL_W - badge_w - Inches(0.12)
-    rect(sl, badge_x, PANEL_Y + Inches(0.14), badge_w, Inches(0.42), s_color)
-    txbox(sl, status.upper(),
-          badge_x, PANEL_Y + Inches(0.14), badge_w, Inches(0.42),
-          size=10, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+    tx_ref = slide.shapes.add_textbox(left + Inches(0.12), top + Inches(0.22),
+                                      Inches(3.5), Inches(0.3))
+    _tf(tx_ref, ref_no, 9, bold=True, color=DARK_BLUE)
 
-    # ── Image section (top half of panel) ─────────────────────────────────────
-    img_y = PANEL_Y + Inches(0.65)
-    img_h = Inches(2.5)
-    img_w = PANEL_W - Inches(0.3)
-    img_x = panel_x + Inches(0.15)
-
-    placed = False
-    if image_url:
-        img_bytes = fetch_image(image_url)
-        if img_bytes:
-            try:
-                sl.shapes.add_picture(io.BytesIO(img_bytes), img_x, img_y, img_w, img_h)
-                placed = True
-            except Exception as e:
-                log.warning(f"Picture insert failed: {e}")
-
-    if not placed:
-        rect(sl, img_x, img_y, img_w, img_h, SURF)
-        txbox(sl, "📷  No Image",
-              img_x, img_y + Inches(1.0), img_w, Inches(0.6),
-              size=13, color=BORDER, align=PP_ALIGN.CENTER)
-
-    # ── Details section (bottom half) ─────────────────────────────────────────
-    details_y  = img_y + img_h + Inches(0.12)
-    detail_h   = Inches(0.42)
-    detail_gap = Inches(0.44)
-
-    fields = [
-        ("👤", obs.get("observer_name", "—")),
-        ("📅", obs.get("datetime",      "—")),
-        ("📍", obs.get("area",          "—")),
-        ("👷", obs.get("responsible",   "—")),
-        ("🎯", obs.get("target_date",   "—")),
-    ]
-
-    for i, (icon, val) in enumerate(fields):
-        fy = details_y + i * detail_gap
-        # Field label chip
-        rect(sl, panel_x + Inches(0.15), fy,
-             Inches(0.32), detail_h, SURF)
-        txbox(sl, icon,
-              panel_x + Inches(0.15), fy,
-              Inches(0.32), detail_h,
-              size=11, align=PP_ALIGN.CENTER)
-        # Value
-        txbox(sl, val,
-              panel_x + Inches(0.52), fy,
-              PANEL_W - Inches(0.65), detail_h,
-              size=10, color=TEXT)
-
-    # ── Observation text at bottom ────────────────────────────────────────────
-    obs_text = obs.get("observation", "")
-    obs_y    = PANEL_Y + PANEL_H - Inches(0.72)
-    rect(sl, panel_x, obs_y, PANEL_W, Inches(0.72), SURF)
-    rect(sl, panel_x, obs_y, Inches(0.08), Inches(0.72), ORANGE)
-    txbox(sl, f"  {obs_text}",
-          panel_x + Inches(0.12), obs_y + Inches(0.06),
-          PANEL_W - Inches(0.18), Inches(0.62),
-          size=10, color=TEXT, wrap=True)
-
-
-def _slide_pair(prs, obs1, obs2):
-    """One slide with 2 observations side by side."""
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    sl.background.fill.solid()
-    sl.background.fill.fore_color.rgb = DARK
-
-    # Top header bar
-    rect(sl, 0, 0, W, Inches(1.3), SURF)
-    rect(sl, 0, 0, Inches(0.12), Inches(1.3), ORANGE)
-    txbox(sl, "ESL STEEL  |  Safety Observations",
-          Inches(0.3), Inches(0.22), Inches(9), Inches(0.55),
-          size=18, bold=True, color=WHITE)
-    txbox(sl, datetime.now().strftime("%d/%m/%Y"),
-          Inches(10), Inches(0.3), Inches(3.1), Inches(0.5),
-          size=12, color=MUTED, align=PP_ALIGN.RIGHT)
-
-    # Divider between panels
-    rect(sl, LEFT_X + PANEL_W + Inches(0.08), PANEL_Y,
-         Inches(0.02), PANEL_H, BORDER)
-
-    # Draw observation panels
-    _draw_obs_panel(sl, obs1, LEFT_X)
-
-    if obs2:
-        _draw_obs_panel(sl, obs2, RIGHT_X)
+    # Photo section
+    img_top  = top + Inches(0.58)
+    img_h    = Inches(2.1)
+    img_data = _fetch_image(obs.get("image_url", ""))
+    if img_data:
+        try:
+            slide.shapes.add_picture(img_data, left + Inches(0.12), img_top,
+                                     width - Inches(0.24), img_h)
+        except Exception:
+            _add_rect(slide, left + Inches(0.12), img_top,
+                      width - Inches(0.24), img_h, MID_GRAY)
     else:
-        # Empty right panel placeholder
-        rect(sl, RIGHT_X, PANEL_Y, PANEL_W, PANEL_H, SURF2)
-        txbox(sl, "—",
-              RIGHT_X, PANEL_Y + Inches(2.5), PANEL_W, Inches(0.7),
-              size=20, color=BORDER, align=PP_ALIGN.CENTER)
+        ph = _add_rect(slide, left + Inches(0.12), img_top,
+                       width - Inches(0.24), img_h, MID_GRAY)
+        tx_ph = slide.shapes.add_textbox(left + Inches(0.12), img_top + Inches(0.85),
+                                         width - Inches(0.24), Inches(0.4))
+        tf_ph = tx_ph.text_frame
+        p_ph  = tf_ph.paragraphs[0]
+        p_ph.alignment = PP_ALIGN.CENTER
+        r_ph  = p_ph.add_run()
+        r_ph.text = "No Photo"
+        r_ph.font.size = Pt(9)
+        r_ph.font.color.rgb = WHITE
+
+    # Details section
+    detail_top = img_top + img_h + Inches(0.1)
+    fields = [
+        ("📅", obs.get("datetime", "—")),
+        ("📍", obs.get("area", "—")),
+        ("👷", obs.get("responsible", "—")),
+        ("🎯", obs.get("target_date", "—")),
+    ]
+
+    obs_text = obs.get("observation", "—")
+    tx_obs = slide.shapes.add_textbox(left + Inches(0.12), detail_top,
+                                      width - Inches(0.24), Inches(0.65))
+    tf_obs = tx_obs.text_frame
+    tf_obs.word_wrap = True
+    p_obs  = tf_obs.paragraphs[0]
+    r_obs  = p_obs.add_run()
+    r_obs.text = obs_text
+    r_obs.font.size = Pt(8)
+    r_obs.font.bold = True
+    r_obs.font.color.rgb = TEXT_DARK
+
+    detail_top += Inches(0.68)
+    for icon, val in fields:
+        tx_f = slide.shapes.add_textbox(left + Inches(0.12), detail_top,
+                                        width - Inches(0.24), Inches(0.28))
+        tf_f = tx_f.text_frame
+        tf_f.word_wrap = True
+        p_f  = tf_f.paragraphs[0]
+        r_f  = p_f.add_run()
+        r_f.text = f"{icon} {val}"
+        r_f.font.size = Pt(8)
+        r_f.font.color.rgb = TEXT_DARK
+        detail_top += Inches(0.3)
 
 
-# ─── MAIN ENTRY ──────────────────────────────────────────────────────────────
-def generate_pptx(observations: list[dict]) -> bytes:
+# ─── CONTENT SLIDE (2 observations) ──────────────────────────────────────────
+def _add_content_slide(prs, obs_pair: list, area_label: str):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    bg = slide.background
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = WHITE
+
+    # Header bar
+    _add_rect(slide, 0, 0, W, Inches(0.65), DARK_BLUE)
+    logo = slide.shapes.add_picture(_logo_stream(), Inches(0.1), Inches(0.05), Inches(1.6), Inches(0.56))
+
+    tx_h = slide.shapes.add_textbox(Inches(1.9), Inches(0.1), Inches(9), Inches(0.5))
+    tf_h = tx_h.text_frame
+    p_h  = tf_h.paragraphs[0]
+    p_h.alignment = PP_ALIGN.RIGHT
+    r_h  = p_h.add_run()
+    r_h.text = f"ESL STEEL | {area_label} | Safety Observations"
+    r_h.font.size = Pt(11)
+    r_h.font.bold = True
+    r_h.font.color.rgb = WHITE
+
+    _add_rect(slide, 0, Inches(0.65), W, Inches(0.05), ORANGE)
+
+    # Two cards side by side
+    padding = Inches(0.18)
+    card_w  = (W - padding * 3) / 2
+    card_h  = H - Inches(0.65) - Inches(0.05) - padding * 2
+
+    for i, obs in enumerate(obs_pair):
+        left = padding + i * (card_w + padding)
+        _add_obs_card(slide, obs, left, Inches(0.78), card_w, card_h)
+
+    # If only 1 obs on slide, fill right half with blank card style
+    if len(obs_pair) == 1:
+        left2 = padding + card_w + padding
+        ph = _add_rect(slide, left2, Inches(0.78), card_w, card_h, LIGHT_GRAY)
+
+
+# ─── PUBLIC API ───────────────────────────────────────────────────────────────
+def generate_pptx(obs_list: list, area: str = "ALL", date_label: str = "") -> bytes:
+    """
+    Generate PPTX for the given observations.
+    area: "ALL" or area name
+    date_label: descriptive string shown in title slide subtitle
+    """
     prs = Presentation()
     prs.slide_width  = W
     prs.slide_height = H
 
-    total     = len(observations)
-    open_c    = sum(1 for o in observations if o.get("status","").lower() == "open")
-    partial_c = sum(1 for o in observations if "partial" in o.get("status","").lower()
-                                            or "progress" in o.get("status","").lower())
-    closed_c  = sum(1 for o in observations if o.get("status","").lower() == "closed")
+    if not obs_list:
+        # Return minimal PPTX with just title
+        _add_title_slide(prs, "No Observations Found", date_label or "", [])
+        buf = io.BytesIO()
+        prs.save(buf)
+        return buf.getvalue()
 
-    # Title + Summary slides
-    _slide_title(prs, total, open_c, closed_c)
-    _slide_summary(prs, total, open_c, partial_c, closed_c)
+    area_display = area if area != "ALL" else "All Areas"
+    subtitle = date_label if date_label else datetime.now().strftime("%d/%m/%Y")
 
-    # Pair up observations — 2 per slide
-    pairs = list(zip_longest(observations[::2], observations[1::2]))
-    for obs1, obs2 in pairs:
-        _slide_pair(prs, obs1, obs2)
+    _add_title_slide(prs, f"Safety Observations — {area_display}", subtitle, obs_list)
+
+    # Content slides: 2 per slide
+    for i in range(0, len(obs_list), 2):
+        pair = obs_list[i:i+2]
+        _add_content_slide(prs, pair, area_display)
 
     buf = io.BytesIO()
     prs.save(buf)
-    buf.seek(0)
-    return buf.read()
+    return buf.getvalue()
+
+
+def generate_pptx_per_area(obs_list: list, date_label: str = "") -> dict:
+    """
+    Returns dict: { area_name: pptx_bytes }
+    Only areas that have observations are included.
+    """
+    result = {}
+    for area in AREAS:
+        filtered = [o for o in obs_list if area.lower() in o.get("area","").lower()]
+        if filtered:
+            result[area] = generate_pptx(filtered, area=area, date_label=date_label)
+    return result
