@@ -42,7 +42,9 @@ H  = Inches(7.5)
 
 
 def _logo_stream() -> io.BytesIO:
-    return io.BytesIO(base64.b64decode(LOGO_B64))
+    # Fix base64 padding if needed
+    padded = LOGO_B64 + "=" * (4 - len(LOGO_B64) % 4) if len(LOGO_B64) % 4 else LOGO_B64
+    return io.BytesIO(base64.b64decode(padded))
 
 
 def _fill_white(shape):
