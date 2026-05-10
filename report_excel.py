@@ -80,7 +80,7 @@ def generate_excel(observations: list[dict]) -> bytes:
         status       = obs.get("status", "Open").strip().lower()
         s_txt, s_bg  = STATUS_MAP.get(status, ("374151", "F9FAFB"))
         row_bg       = "F0F4FF" if r % 2 == 0 else "FFFFFF"
-        image_url    = obs.get("image_url", "").strip()
+        image_b64    = obs.get("image_b64", "").strip()
 
         vals = [
             obs.get("ref_no",       ""),
@@ -90,7 +90,7 @@ def generate_excel(observations: list[dict]) -> bytes:
             obs.get("responsible",  ""),
             obs.get("status",       ""),
             obs.get("target_date",  ""),
-            "📷 View Photo" if image_url else "No Photo",
+            "📷 Photo" if image_b64 else "No Photo",
         ]
 
         CENTER_COLS = {1, 2, 6, 7, 8}
@@ -106,11 +106,9 @@ def generate_excel(observations: list[dict]) -> bytes:
             if c == 6:                      # Status
                 cell.fill = _fill(s_bg)
                 cell.font = Font(bold=True, size=11, color=s_txt, name="Segoe UI")
-            elif c == 8 and image_url:      # Picture hyperlink
-                cell.fill      = _fill(row_bg)
-                cell.hyperlink = image_url
-                cell.font      = Font(bold=True, size=11, color=C_BLUE,
-                                      underline="single", name="Segoe UI")
+            elif c == 8 and image_b64:      # Picture — base64 stored, no hyperlink
+                cell.fill = _fill(row_bg)
+                cell.font = Font(bold=True, size=11, color="16A34A", name="Segoe UI")
             else:
                 cell.fill = _fill(row_bg)
                 cell.font = Font(size=11, name="Segoe UI")
