@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from flask import Flask
+from flask import Flask, request, Response
 
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -52,6 +52,41 @@ def home():
 @flask_app.route("/health")
 def health():
     return {"status": "ok", "bot": "ESL-SAFETY-BOT"}, 200
+
+
+@flask_app.route("/photo-proxy")
+def photo_proxy():
+    """
+    Proxy Telegram photo URLs for the dashboard PPTX export.
+    The browser can't fetch api.telegram.org directly (CORS + bot token embedded
+    in the URL path), so the dashboard calls this endpoint instead.
+
+    Usage:  GET /photo-proxy?url=https://api.telegram.org/file/bot.../photo.jpg
+    Returns the image bytes with Access-Control-Allow-Origin: * so the browser
+    can convert it to a base64 data URL and embed it in PptxGenJS.
+    """
+    url = request.args.get("url", "").strip()
+
+    # Only proxy Telegram file URLs — reject anything else
+    if not url or "api.telegram.org/file/" not in url:
+        return "Only Telegram file URLs are accepted.", 400
+
+    try:
+        r = requests.get(url, timeout=10, stream=False)
+        r.raise_for_status()
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        return Response(
+            r.content,
+            status=200,
+            headers={
+                "Content-Type":                content_type,
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control":               "public, max-age=3600",
+            }
+        )
+    except Exception as e:
+        log.warning(f"[photo-proxy] failed for {url!r}: {e}")
+        return "Proxy fetch failed", 502
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
