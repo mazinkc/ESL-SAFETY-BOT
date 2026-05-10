@@ -5,7 +5,7 @@ White background | Vedanta/ESL Logo | 2 observations per slide
 
 import io
 import os
-import requests
+import base64
 from datetime import datetime
 
 from pptx import Presentation
@@ -76,13 +76,19 @@ def _status_color(status: str) -> RGBColor:
     return STATUS_COLORS["open"]
 
 
-def _fetch_image(url: str):
-    if not url:
+def _fetch_image(obs: dict):
+    """
+    Decode the base64 photo stored in `image_b64`.
+    Returns a BytesIO stream, or None if no photo is present.
+    """
+    data_url = obs.get("image_b64", "")
+    if not data_url:
         return None
     try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        return io.BytesIO(r.content)
+        # Strip the data-URL prefix: "data:image/jpeg;base64,<data>"
+        if "," in data_url:
+            data_url = data_url.split(",", 1)[1]
+        return io.BytesIO(base64.b64decode(data_url))
     except Exception:
         return None
 
@@ -190,7 +196,7 @@ def _add_obs_card(slide, obs: dict, left, top, width, height):
     # Photo
     img_top = top + Inches(0.58)
     img_h   = Inches(2.1)
-    img_data = _fetch_image(obs.get("image_url", ""))
+    img_data = _fetch_image(obs)
     if img_data:
         try:
             slide.shapes.add_picture(img_data, left + Inches(0.12), img_top,
