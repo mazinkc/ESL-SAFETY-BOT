@@ -24,6 +24,7 @@ import re
 import base64
 import logging
 import threading
+import time
 import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -66,8 +67,10 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_flask, daemon=True).start()
-log.info("Flask keep-alive server started.")
+def start_flask_keepalive():
+    thread = threading.Thread(target=run_flask, daemon=True, name="flask-keepalive")
+    thread.start()
+    log.info("Flask keep-alive server started.")
 
 # ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
 _firebase_creds = json.loads(os.environ["FIREBASE_CREDS_JSON"])
@@ -94,7 +97,3 @@ def to_local_dt(value: datetime | None = None) -> datetime:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(LOCAL_TZ)
 
-
-def telegram_message_time(message) -> tuple[datetime, str]:
-    origin = getattr(message, "forward_origin", None)
-    origin_date = getattr(origin, "date", None)
