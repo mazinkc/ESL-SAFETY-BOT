@@ -10,19 +10,27 @@ New Features:
   ✅ /stats — department-wise breakdown
   ✅ Auto area classification from observation text
   ✅ /mystats — per-officer stats
+
+Photo Storage:
+  ✅ Photos compressed with Pillow (max 800px, JPEG q=60)
+  ✅ Stored as base64 data URL in Firestore field `image_b64`
+  ✅ No Firebase Storage / no external URL needed
 """
 
 import os
 import io
 import json
 import re
+import base64
 import logging
 import threading
 import requests
 from datetime import datetime, timedelta
 
 import firebase_admin
-from firebase_admin import credentials, firestore, storage
+from firebase_admin import credentials, firestore
+
+from PIL import Image
 
 from flask import Flask
 
@@ -63,31 +71,38 @@ log.info("Flask keep-alive server started.")
 # ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
 _firebase_creds = json.loads(os.environ["FIREBASE_CREDS_JSON"])
 _cred = credentials.Certificate(_firebase_creds)
-firebase_admin.initialize_app(_cred, {
-    "storageBucket": "apex-esl.firebasestorage.app"
-})
-db     = firestore.client()
-bucket = storage.bucket()   # Firebase Storage bucket
-
-
-def upload_to_storage(image_bytes: bytes, gcs_path: str) -> str:
-    """
-    Upload raw image bytes to Firebase Storage and return a permanent public URL.
-    gcs_path example: "observations/OBS-26-0014_obs.jpg"
-    Returns "" on failure so callers can fall back gracefully.
-    """
-    try:
-        blob = bucket.blob(gcs_path)
-        blob.upload_from_string(image_bytes, content_type="image/jpeg")
-        blob.make_public()
-        url = blob.public_url
-        log.info(f"[storage] uploaded → {gcs_path}")
-        return url
-    except Exception as e:
-        log.warning(f"[storage] upload failed for {gcs_path!r}: {e}")
-        return ""
+firebase_admin.initialize_app(_cred)          # no storageBucket needed
+db = firestore.client()
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+
+# ─── IMAGE COMPRESSION → BASE64 ──────────────────────────────────────────────
+MAX_PX   = 800    # longest side in pixels
+QUALITY  = 60     # JPEG quality (0-100); 60 ≈ 80-150 KB for a typical site photo
+
+def compress_to_b64(image_bytes: bytes) -> str:
+    """
+    Resize image to MAX_PX on longest side, re-encode as JPEG at QUALITY,
+    and return a base64 data-URL string suitable for storing in Firestore.
+
+    Returns "" on any failure so callers can degrade gracefully.
+    Typical output: 80–200 KB base64 string (~107–267 KB stored).
+    Firestore 1 MB document limit is safe for all normal site photos.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert("RGB")                       # drop alpha / palette
+        img.thumbnail((MAX_PX, MAX_PX), Image.LANCZOS) # resize in place, keeps ratio
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=QUALITY, optimize=True)
+        encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+        data_url = f"data:image/jpeg;base64,{encoded}"
+        kb = len(buf.getvalue()) / 1024
+        log.info(f"[compress] {kb:.0f} KB JPEG → base64 ({len(data_url)//1024} KB string)")
+        return data_url
+    except Exception as e:
+        log.warning(f"[compress] failed: {e}")
+        return ""
 
 # ─── DEPARTMENTS ─────────────────────────────────────────────────────────────
 AREAS = [
@@ -136,15 +151,14 @@ def parse_observation(text: str) -> dict | None:
     if "observation" not in obs:
         return None
 
-    # Auto-classify area if not provided
     if "area" not in obs or not obs["area"].strip():
         detected = classify_area(obs.get("observation", "") + " " + text)
         if detected:
-            obs["area"]          = detected
-            obs["area_auto"]     = True   # flag so we can tell user it was auto-detected
+            obs["area"]      = detected
+            obs["area_auto"] = True
         else:
-            obs["area"]          = "UNKNOWN"
-            obs["area_auto"]     = False
+            obs["area"]      = "UNKNOWN"
+            obs["area_auto"] = False
     else:
         obs["area_auto"] = False
 
@@ -167,7 +181,7 @@ def save_observation(obs: dict) -> str:
     obs["log_date"]  = datetime.now().strftime("%d/%m/%Y")
     obs["log_ts"]    = datetime.now().isoformat()
     obs.setdefault("status",        "Open")
-    obs.setdefault("image_url",     "")
+    obs.setdefault("image_b64",     "")     # base64 data-URL or ""
     obs.setdefault("observer_name", "—")
     db.collection("observations").document(ref_no).set(obs)
     log.info(f"Saved {ref_no}")
@@ -246,15 +260,14 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ No observations recorded yet.")
             return
 
-        open_c    = sum(1 for o in all_obs if "open"     in o.get("status","").lower() and "progress" not in o.get("status","").lower())
-        prog_c    = sum(1 for o in all_obs if "progress" in o.get("status","").lower())
-        closed_c  = sum(1 for o in all_obs if "closed"   in o.get("status","").lower())
-        rate      = f"{closed_c / total * 100:.1f}%" if total else "N/A"
+        open_c   = sum(1 for o in all_obs if "open"     in o.get("status","").lower() and "progress" not in o.get("status","").lower())
+        prog_c   = sum(1 for o in all_obs if "progress" in o.get("status","").lower())
+        closed_c = sum(1 for o in all_obs if "closed"   in o.get("status","").lower())
+        rate     = f"{closed_c / total * 100:.1f}%" if total else "N/A"
 
-        # Department-wise breakdown
         dept_lines = []
         for area in AREAS:
-            area_obs    = [o for o in all_obs if area.lower() in o.get("area", "").lower()]
+            area_obs = [o for o in all_obs if area.lower() in o.get("area", "").lower()]
             if not area_obs:
                 continue
             a_total  = len(area_obs)
@@ -292,12 +305,12 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_mystats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show personal submission stats for the requesting user."""
     try:
-        user     = update.effective_user
-        name     = user.full_name or user.username or str(user.id)
-        all_obs  = load_all()
-        my_obs   = [o for o in all_obs
-                    if name.lower() in o.get("observer_name", "").lower()
-                    or (user.username or "").lower() in o.get("observer_name", "").lower()]
+        user    = update.effective_user
+        name    = user.full_name or user.username or str(user.id)
+        all_obs = load_all()
+        my_obs  = [o for o in all_obs
+                   if name.lower() in o.get("observer_name", "").lower()
+                   or (user.username or "").lower() in o.get("observer_name", "").lower()]
 
         if not my_obs:
             await update.message.reply_text(
@@ -335,7 +348,6 @@ async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user    = update.effective_user
 
-    # Parse ref number from command args
     args = ctx.args
     if not args:
         await message.reply_text(
@@ -370,31 +382,29 @@ async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Save closure photo → Firebase Storage
-    closure_image_url = ""
+    # Compress closure photo → base64
+    closure_b64 = ""
     if message.photo:
         try:
             photo     = message.photo[-1]
             tg_file   = await ctx.bot.get_file(photo.file_id)
             img_bytes = await tg_file.download_as_bytearray()
-
-            gcs_path          = f"closures/{ref_no}_{photo.file_id}.jpg"
-            closure_image_url = upload_to_storage(bytes(img_bytes), gcs_path)
-            log.info(f"Closure photo uploaded to Firebase Storage for {ref_no}")
+            closure_b64 = compress_to_b64(bytes(img_bytes))
+            log.info(f"Closure photo compressed for {ref_no}")
         except Exception as e:
-            log.warning(f"Closure photo upload failed: {e}")
+            log.warning(f"Closure photo compression failed: {e}")
 
     closed_by = user.full_name or user.username or str(user.id)
     closed_at = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     update_observation(ref_no, {
-        "status":              "Closed",
-        "closed_by":           closed_by,
-        "closed_at":           closed_at,
-        "closure_image_url":   closure_image_url,
+        "status":           "Closed",
+        "closed_by":        closed_by,
+        "closed_at":        closed_at,
+        "closure_b64":      closure_b64,   # base64 closure photo (or "")
     })
 
-    photo_note = "📷 Closure photo saved ✅" if closure_image_url else "📷 No closure photo"
+    photo_note = "📷 Closure photo saved ✅" if closure_b64 else "📷 No closure photo"
 
     await message.reply_text(
         f"✅ *Observation Closed!*\n"
@@ -485,7 +495,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
-    # Ignore /close with photo (handled by cmd_close)
     text = (message.text or message.caption or "").strip()
     if text.lower().startswith("/close"):
         return
@@ -501,28 +510,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Capture photo → upload to Firebase Storage
-    obs["image_url"] = ""
-    obs["file_id"]   = ""
+    # Compress photo → base64, store inline in Firestore
+    obs["image_b64"] = ""
     if message.photo:
         try:
-            photo    = message.photo[-1]          # highest resolution
-            tg_file  = await ctx.bot.get_file(photo.file_id)
+            photo     = message.photo[-1]          # highest resolution
+            tg_file   = await ctx.bot.get_file(photo.file_id)
             img_bytes = await tg_file.download_as_bytearray()
-
-            # We don't have the ref_no yet; use file_id as a stable unique key
-            gcs_path         = f"observations/{photo.file_id}.jpg"
-            obs["image_url"] = upload_to_storage(bytes(img_bytes), gcs_path)
-            obs["file_id"]   = photo.file_id
-            log.info("Photo uploaded to Firebase Storage")
+            obs["image_b64"] = compress_to_b64(bytes(img_bytes))
         except Exception as e:
-            log.warning(f"Image capture/upload failed: {e}")
+            log.warning(f"Image capture/compression failed: {e}")
 
     try:
         ref_no   = save_observation(obs)
-        img_note = "📷 Photo saved ✅" if obs.get("image_url") else "📷 No photo"
+        img_note = "📷 Photo saved ✅" if obs.get("image_b64") else "📷 No photo"
 
-        # Note if area was auto-detected
         area_note = ""
         if obs.get("area_auto"):
             area_note = f"\n🤖 Area auto-detected from text"
@@ -562,7 +564,7 @@ def main():
     ))
 
     log.info("Bot started. Polling...")
-    app.run_polling(drop_pending_updates=True)   # drop_pending clears old conflict
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
