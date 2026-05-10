@@ -1,6 +1,7 @@
 """
 ESL Safety Observation - PPTX Report Generator
 White background | Vedanta/ESL Logo | 2 observations per slide
+Embeds photos directly in PPTX. No Telegram hyperlinks.
 """
 
 import io
@@ -8,11 +9,13 @@ import os
 import base64
 from datetime import datetime
 
+import requests
 from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+
 
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 DARK_BLUE = RGBColor(0x00, 0x33, 0x6B)
@@ -60,13 +63,21 @@ def _add_text(slide, text, left, top, width, height,
     tx = slide.shapes.add_textbox(left, top, width, height)
     tf = tx.text_frame
     tf.word_wrap = wrap
+    tf.margin_left = Pt(4)
+    tf.margin_right = Pt(4)
+    tf.margin_top = Pt(2)
+    tf.margin_bottom = Pt(2)
+
     p = tf.paragraphs[0]
     p.alignment = align
+
     run = p.add_run()
     run.text = str(text or "")
     run.font.size = Pt(size)
     run.font.bold = bold
     run.font.color.rgb = color
+
+    return tx
 
 
 def _status_color(status):
@@ -77,19 +88,51 @@ def _status_color(status):
     return STATUS_COLORS["open"]
 
 
+def _photo_url_from_obs(obs):
+    """
+    Supports old records where photo was stored as Telegram/file URL.
+    """
+    for key in [
+        "image_url",
+        "photo_url",
+        "photo",
+        "photo_link",
+        "image",
+        "image_link",
+        "telegram_photo_url",
+    ]:
+        val = obs.get(key)
+        if val and str(val).startswith("http"):
+            return str(val)
+    return ""
+
+
 def _fetch_image(obs):
     """
-    Decode image_b64 or closure_b64 and return a clean JPEG stream for python-pptx.
+    Return a clean JPEG stream for python-pptx.
+
+    Supports:
+    1. image_b64 data URL
+    2. closure_b64 data URL
+    3. old Telegram/photo URL fields
+
+    Important: this embeds the image into PPTX. It does not create hyperlinks.
     """
-    data_url = obs.get("image_b64") or obs.get("closure_b64") or ""
-    if not data_url:
-        return None
-
     try:
-        if "," in data_url:
-            data_url = data_url.split(",", 1)[1]
+        data_url = obs.get("image_b64") or obs.get("closure_b64") or ""
 
-        raw = base64.b64decode(data_url)
+        if data_url:
+            if "," in data_url:
+                data_url = data_url.split(",", 1)[1]
+            raw = base64.b64decode(data_url)
+        else:
+            photo_url = _photo_url_from_obs(obs)
+            if not photo_url:
+                return None
+
+            response = requests.get(photo_url, timeout=20)
+            response.raise_for_status()
+            raw = response.content
 
         img = Image.open(io.BytesIO(raw))
         img = img.convert("RGB")
@@ -99,7 +142,9 @@ def _fetch_image(obs):
         img.save(out, format="JPEG", quality=88, optimize=True)
         out.seek(0)
         return out
-    except Exception:
+
+    except Exception as e:
+        print(f"Photo embed failed: {e}")
         return None
 
 
@@ -112,6 +157,28 @@ def _add_logo(slide, left, top, width, height):
             pass
         finally:
             logo.close()
+
+
+def _add_photo_box(slide, obs, left, top, width, height):
+    img_data = _fetch_image(obs)
+
+    if img_data:
+        try:
+            slide.shapes.add_picture(img_data, left, top, width, height)
+            return
+        except Exception as e:
+            print(f"PPT photo add failed: {e}")
+            label = "Photo Error"
+    else:
+        label = "No Photo"
+
+    _add_rect(slide, left, top, width, height, MID_GRAY)
+    _add_text(
+        slide, label,
+        left, top + height / 2 - Inches(0.2),
+        width, Inches(0.4),
+        size=9, bold=True, color=WHITE, align=PP_ALIGN.CENTER
+    )
 
 
 def _add_title_slide(prs, title_line1, title_line2, obs_list):
@@ -166,12 +233,15 @@ def _add_title_slide(prs, title_line1, title_line2, obs_list):
 
     for i, (label, val, col) in enumerate(stats):
         bx = start_x + i * (box_w + Inches(0.3))
+
         _add_rect(slide, bx, Inches(4.4), box_w, Inches(1.8), col)
+
         _add_text(
             slide, val,
             bx, Inches(4.4), box_w, Inches(1.0),
             size=36, bold=True, color=WHITE, align=PP_ALIGN.CENTER
         )
+
         _add_text(
             slide, label,
             bx, Inches(5.3), box_w, Inches(0.5),
@@ -179,6 +249,7 @@ def _add_title_slide(prs, title_line1, title_line2, obs_list):
         )
 
     _add_rect(slide, 0, Inches(6.9), W, Inches(0.6), LIGHT_GRAY)
+
     _add_text(
         slide,
         f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')} | Vedanta Group - ESL Steel Limited",
@@ -208,52 +279,32 @@ def _add_obs_card(slide, obs, left, top, width, height):
     )
 
     badge_w = Inches(1.4)
+    badge_left = left + width - badge_w - Inches(0.1)
+
     _add_rect(
         slide,
-        left + width - badge_w - Inches(0.1),
+        badge_left,
         top + Inches(0.22),
         badge_w,
         Inches(0.28),
         sc
     )
+
     _add_text(
         slide, status.upper(),
-        left + width - badge_w - Inches(0.1),
+        badge_left,
         top + Inches(0.22),
         badge_w,
         Inches(0.28),
         size=7, bold=True, color=WHITE, align=PP_ALIGN.CENTER
     )
 
+    img_left = left + Inches(0.12)
     img_top = top + Inches(0.58)
+    img_w = width - Inches(0.24)
     img_h = Inches(2.1)
-    img_data = _fetch_image(obs)
 
-    if img_data:
-        try:
-            slide.shapes.add_picture(
-                img_data,
-                left + Inches(0.12),
-                img_top,
-                width - Inches(0.24),
-                img_h
-            )
-        except Exception:
-            _add_rect(slide, left + Inches(0.12), img_top, width - Inches(0.24), img_h, MID_GRAY)
-            _add_text(
-                slide, "Photo Error",
-                left + Inches(0.12), img_top + Inches(0.85),
-                width - Inches(0.24), Inches(0.4),
-                size=9, color=WHITE, align=PP_ALIGN.CENTER
-            )
-    else:
-        _add_rect(slide, left + Inches(0.12), img_top, width - Inches(0.24), img_h, MID_GRAY)
-        _add_text(
-            slide, "No Photo",
-            left + Inches(0.12), img_top + Inches(0.85),
-            width - Inches(0.24), Inches(0.4),
-            size=9, color=WHITE, align=PP_ALIGN.CENTER
-        )
+    _add_photo_box(slide, obs, img_left, img_top, img_w, img_h)
 
     detail_top = img_top + img_h + Inches(0.1)
 
@@ -264,6 +315,7 @@ def _add_obs_card(slide, obs, left, top, width, height):
         width - Inches(0.24), Inches(0.65),
         size=8, bold=True, color=TEXT_DARK, wrap=True
     )
+
     detail_top += Inches(0.68)
 
     details = [
@@ -349,6 +401,7 @@ def generate_pptx_per_area(obs_list, date_label=""):
             o for o in obs_list
             if area.lower() in o.get("area", "").lower()
         ]
+
         if filtered:
             result[area] = generate_pptx(
                 filtered,
