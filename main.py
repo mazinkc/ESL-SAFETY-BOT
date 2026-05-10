@@ -22,9 +22,9 @@ import requests
 from datetime import datetime, timedelta
 
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, storage
 
-from flask import Flask, request, Response
+from flask import Flask
 
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -53,41 +53,6 @@ def home():
 def health():
     return {"status": "ok", "bot": "ESL-SAFETY-BOT"}, 200
 
-
-@flask_app.route("/photo-proxy")
-def photo_proxy():
-    """
-    Proxy Telegram photo URLs for the dashboard PPTX export.
-    The browser can't fetch api.telegram.org directly (CORS + bot token embedded
-    in the URL path), so the dashboard calls this endpoint instead.
-
-    Usage:  GET /photo-proxy?url=https://api.telegram.org/file/bot.../photo.jpg
-    Returns the image bytes with Access-Control-Allow-Origin: * so the browser
-    can convert it to a base64 data URL and embed it in PptxGenJS.
-    """
-    url = request.args.get("url", "").strip()
-
-    # Only proxy Telegram file URLs — reject anything else
-    if not url or "api.telegram.org/file/" not in url:
-        return "Only Telegram file URLs are accepted.", 400
-
-    try:
-        r = requests.get(url, timeout=10, stream=False)
-        r.raise_for_status()
-        content_type = r.headers.get("Content-Type", "image/jpeg")
-        return Response(
-            r.content,
-            status=200,
-            headers={
-                "Content-Type":                content_type,
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control":               "public, max-age=3600",
-            }
-        )
-    except Exception as e:
-        log.warning(f"[photo-proxy] failed for {url!r}: {e}")
-        return "Proxy fetch failed", 502
-
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
@@ -98,8 +63,29 @@ log.info("Flask keep-alive server started.")
 # ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
 _firebase_creds = json.loads(os.environ["FIREBASE_CREDS_JSON"])
 _cred = credentials.Certificate(_firebase_creds)
-firebase_admin.initialize_app(_cred)
-db = firestore.client()
+firebase_admin.initialize_app(_cred, {
+    "storageBucket": "apex-esl.firebasestorage.app"
+})
+db     = firestore.client()
+bucket = storage.bucket()   # Firebase Storage bucket
+
+
+def upload_to_storage(image_bytes: bytes, gcs_path: str) -> str:
+    """
+    Upload raw image bytes to Firebase Storage and return a permanent public URL.
+    gcs_path example: "observations/OBS-26-0014_obs.jpg"
+    Returns "" on failure so callers can fall back gracefully.
+    """
+    try:
+        blob = bucket.blob(gcs_path)
+        blob.upload_from_string(image_bytes, content_type="image/jpeg")
+        blob.make_public()
+        url = blob.public_url
+        log.info(f"[storage] uploaded → {gcs_path}")
+        return url
+    except Exception as e:
+        log.warning(f"[storage] upload failed for {gcs_path!r}: {e}")
+        return ""
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
@@ -384,16 +370,19 @@ async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Save closure photo if attached
+    # Save closure photo → Firebase Storage
     closure_image_url = ""
     if message.photo:
         try:
-            photo             = message.photo[-1]
-            tg_file           = await ctx.bot.get_file(photo.file_id)
-            closure_image_url = tg_file.file_path
-            log.info(f"Closure photo saved for {ref_no}")
+            photo     = message.photo[-1]
+            tg_file   = await ctx.bot.get_file(photo.file_id)
+            img_bytes = await tg_file.download_as_bytearray()
+
+            gcs_path          = f"closures/{ref_no}_{photo.file_id}.jpg"
+            closure_image_url = upload_to_storage(bytes(img_bytes), gcs_path)
+            log.info(f"Closure photo uploaded to Firebase Storage for {ref_no}")
         except Exception as e:
-            log.warning(f"Closure photo capture failed: {e}")
+            log.warning(f"Closure photo upload failed: {e}")
 
     closed_by = user.full_name or user.username or str(user.id)
     closed_at = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -512,18 +501,22 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Capture photo
+    # Capture photo → upload to Firebase Storage
     obs["image_url"] = ""
     obs["file_id"]   = ""
     if message.photo:
         try:
-            photo            = message.photo[-1]
-            tg_file          = await ctx.bot.get_file(photo.file_id)
-            obs["image_url"] = tg_file.file_path
+            photo    = message.photo[-1]          # highest resolution
+            tg_file  = await ctx.bot.get_file(photo.file_id)
+            img_bytes = await tg_file.download_as_bytearray()
+
+            # We don't have the ref_no yet; use file_id as a stable unique key
+            gcs_path         = f"observations/{photo.file_id}.jpg"
+            obs["image_url"] = upload_to_storage(bytes(img_bytes), gcs_path)
             obs["file_id"]   = photo.file_id
-            log.info("Image URL captured from Telegram")
+            log.info("Photo uploaded to Firebase Storage")
         except Exception as e:
-            log.warning(f"Image capture failed: {e}")
+            log.warning(f"Image capture/upload failed: {e}")
 
     try:
         ref_no   = save_observation(obs)
