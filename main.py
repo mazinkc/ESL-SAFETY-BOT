@@ -112,24 +112,73 @@ AREAS = [
 
 # ─── AUTO AREA CLASSIFIER ────────────────────────────────────────────────────
 AREA_KEYWORDS = {
-    "RMHS":                 ["rmhs", "raw material", "conveyor", "stockyard", "stacker", "reclaimer"],
-    "SINTER":               ["sinter", "sintering", "sinter plant"],
-    "COKE OVEN":            ["coke", "oven", "coke oven", "battery", "coke battery"],
+    "RMHS":                 ["rmhs", "raw material", "stockyard", "stacker", "reclaimer", "wagon", "tippler"],
+    "SINTER":               ["sinter", "sintering", "sinter plant", "sinter machine"],
+    "COKE OVEN":            ["coke oven", "coke", "oven", "battery", "coke battery", "vco", "cpcs", "pusher", "charging ram", "crusher"],
     "POWERPLANT":           ["power", "turbine", "boiler", "generator", "power plant", "powerplant", "dg"],
-    "BLAST FURNACE 2":      ["bf2", "blast furnace 2", "furnace 2", "bf-2", "bf 2"],
-    "BLAST FURNACE 3":      ["bf3", "blast furnace 3", "furnace 3", "bf-3", "bf 3"],
+    "BLAST FURNACE 2":      ["bf#2", "bf2", "blast furnace 2", "furnace 2", "bf-2", "bf 2"],
+    "BLAST FURNACE 3":      ["bf#3", "bf3", "blast furnace 3", "furnace 3", "bf-3", "bf 3"],
     "PCI":                  ["pci", "pulverized coal", "pulverised coal", "coal injection"],
-    "PCM":                  ["pcm", "process control", "casting", "metal"],
-    "SECONDARY OPERATIONS": ["secondary", "rolling", "SMS", "steel melt", "ladle", "torpedo"],
+    "PCM":                  ["pcm", "process control"],
+    "SECONDARY OPERATIONS": ["secondary operations", "secondary"],
 }
 
 def classify_area(text: str) -> str | None:
     """Auto-detect area from observation text. Returns area name or None."""
     text_lower = text.lower()
+    best_area = None
+    best_score = 0
     for area, keywords in AREA_KEYWORDS.items():
-        if any(kw.lower() in text_lower for kw in keywords):
-            return area
-    return None
+        score = 0
+        for kw in keywords:
+            kw_l = kw.lower()
+            if kw_l in text_lower:
+                score += 2 + len(kw_l.split())
+        if score > best_score:
+            best_area = area
+            best_score = score
+    return best_area
+
+
+def clean_forwarded_message(text: str) -> str:
+    """Remove WhatsApp/Telegram forwarding noise while preserving the observation."""
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip().strip("*")
+        if not line:
+            continue
+        low = line.lower()
+        if low in {"forwarded", "this message was deleted"}:
+            continue
+        if "(file attached)" in low:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def split_location_and_observation(text: str, detected_area: str | None) -> tuple[str, str]:
+    """
+    Supports WhatsApp captions like:
+      BF#2, HBS
+      Pencil grinder and grinding machine were found...
+    """
+    cleaned = clean_forwarded_message(text)
+    lines = [l.strip().strip("*") for l in cleaned.splitlines() if l.strip()]
+    if not lines:
+        return "", ""
+
+    first = lines[0]
+    rest = "\n".join(lines[1:]).strip()
+
+    first_has_area = bool(classify_area(first))
+    short_location = len(first) <= 60 and (
+        "," in first or "#" in first or bool(re.search(r"\b(bf|hbs|vco|cpcs|rmhs|sinter|pci|pcm)\b", first, re.I))
+    )
+
+    if rest and short_location:
+        return first, rest
+
+    return "", cleaned
 
 # ─── FIELD PARSER ────────────────────────────────────────────────────────────
 _PATTERNS = {
@@ -148,11 +197,20 @@ def parse_observation(text: str) -> dict | None:
         m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
         if m:
             obs[field] = m.group(1).strip()
+
+    detected = classify_area(text)
+    location_line = ""
+
     if "observation" not in obs:
-        return None
+        location_line, flexible_observation = split_location_and_observation(text, detected)
+        if len(flexible_observation) < 10:
+            return None
+        obs["observation"] = flexible_observation
+        obs["source_format"] = "whatsapp_forward"
+    else:
+        obs["source_format"] = "field_format"
 
     if "area" not in obs or not obs["area"].strip():
-        detected = classify_area(obs.get("observation", "") + " " + text)
         if detected:
             obs["area"]      = detected
             obs["area_auto"] = True
@@ -161,6 +219,12 @@ def parse_observation(text: str) -> dict | None:
             obs["area_auto"] = False
     else:
         obs["area_auto"] = False
+
+    if location_line:
+        obs["location"] = location_line
+    obs.setdefault("responsible", "-")
+    obs.setdefault("target_date", "-")
+    obs.setdefault("status", "Open")
 
     return obs
 
