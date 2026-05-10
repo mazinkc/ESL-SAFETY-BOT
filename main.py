@@ -48,7 +48,8 @@ from report_pptx  import generate_pptx, generate_pptx_per_area
 # ─── LOGGING ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    force=True,
 )
 log = logging.getLogger(__name__)
 
@@ -73,12 +74,8 @@ def start_flask_keepalive():
     log.info("Flask keep-alive server started.")
 
 # ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
-_firebase_creds = json.loads(os.environ["FIREBASE_CREDS_JSON"])
-_cred = credentials.Certificate(_firebase_creds)
-firebase_admin.initialize_app(_cred)          # no storageBucket needed
-db = firestore.client()
-
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+db = None
+BOT_TOKEN = None
 
 try:
     LOCAL_TZ = ZoneInfo(os.environ.get("LOCAL_TZ", "Asia/Kolkata"))
@@ -86,14 +83,18 @@ except Exception:
     LOCAL_TZ = timezone(timedelta(hours=5, minutes=30))
 
 
-def local_now() -> datetime:
-    return datetime.now(LOCAL_TZ)
+def require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required Render environment variable: {name}")
+    return value
 
 
-def to_local_dt(value: datetime | None = None) -> datetime:
-    if value is None:
-        return local_now()
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(LOCAL_TZ)
+def init_runtime_config():
+    global db, BOT_TOKEN
 
+    if db is None:
+        raw_creds = require_env("FIREBASE_CREDS_JSON")
+        try:
+            firebase_creds = json.loads(raw_creds)
+        except json.JSONDecodeError as e:
