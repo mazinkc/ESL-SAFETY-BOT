@@ -4,6 +4,8 @@ ESL Safety Observation Bot — Firebase Edition
 Fixes:
   ✅ Flask keep-alive (fixes Render port timeout)
   ✅ delete_webhook on startup (fixes Conflict error)
+  ✅ Crash-loop fixed — let Render auto-restart container, not Python while-loop
+  ✅ Event loop closure issue fixed (close_loop=False)
 
 New Features:
   ✅ /close OBS-26-0014 [photo] — close with proof
@@ -24,8 +26,6 @@ import re
 import base64
 import logging
 import threading
-import time
-import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -712,18 +712,37 @@ def build_bot_application():
 
 
 def main():
+    """
+    Run the bot ONCE per process.
+
+    Why no while-True loop:
+      • Application.run_polling() closes the asyncio event loop on exit.
+      • Restarting it in the same process triggers:
+            RuntimeError: Event loop is closed
+      • The correct pattern is: exit the process, let Render restart the container.
+      • Exit code != 0 tells Render to auto-restart with a fresh process.
+    """
     start_flask_keepalive()
-    while True:
-        try:
-            app = build_bot_application()
-            log.info("Bot started. Polling...")
-            app.run_polling(drop_pending_updates=True)
-            log.warning("Telegram polling stopped without an exception. Restarting in 15 seconds.")
-        except KeyboardInterrupt:
-            raise
-        except Exception:
-            log.exception("Telegram polling crashed. Restarting in 15 seconds.")
-        time.sleep(15)
+
+    try:
+        app = build_bot_application()
+        log.info("Bot started. Polling...")
+        app.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,        # keep event loop healthy during shutdown
+            stop_signals=None,       # let Render handle SIGTERM cleanly
+        )
+        # If run_polling returns normally (rare, e.g. clean shutdown),
+        # exit normally so Render doesn't keep restarting us.
+        log.info("Polling stopped cleanly. Exiting.")
+
+    except KeyboardInterrupt:
+        log.info("KeyboardInterrupt — shutting down.")
+
+    except Exception:
+        log.exception("Bot crashed. Exiting so Render restarts the container.")
+        # Non-zero exit → Render auto-restart kicks in with a fresh process.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
